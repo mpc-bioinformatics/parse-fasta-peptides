@@ -180,13 +180,13 @@ public class ParseFastaPeptides {
 
     public static void main(String[] argv) throws IOException, DigestException {
         ParseFastaPeptides parser = new ParseFastaPeptides(
-                "/mnt/data/uniNOBACKUP/FASTAs/18mix_db_plus_contaminants_20081209-edited_nicer_headers.fasta",
+                "/mnt/data/uniNOBACKUP/FASTAs/uniprot-taxonomy-taxonomy_homo_sapiens-isos-2017_04.fasta",
                 new String[]{Enzyme.TRYPSIN.toString()},
                 6,
-                0,
+                45,
                 2);
 
-        String outFileName = "/mnt/data/uniNOBACKUP/FASTAs/18mix_db_plus_contaminants_20081209-edited_nicer_headers.fasta.trypsin-2_missed-6_45.txt";
+        String outFileName = "/mnt/data/uniNOBACKUP/FASTAs/shared/uniprot-taxonomy-taxonomy_homo_sapiens-isos-2017_04.fasta.trypsin-2_missed-6_0.txt";
         boolean split = false;
         int splitlength = 1000000;
 

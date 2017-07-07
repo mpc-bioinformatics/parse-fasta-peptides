@@ -1,10 +1,8 @@
 package de.mpc.tools.parsefastapeptide;
 
-import java.io.BufferedReader;
-import java.io.DataInputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.util.Scanner;
 
 /**
  * Abstract class for FASTA file parsing. Provides the basic parsing functions,
@@ -52,17 +50,16 @@ public abstract class AbstractFastaParser {
      */
     public int parseFastaFile() throws IOException {
         int entryCount = 0;
-        try (
-                FileInputStream fileStream = new FileInputStream(getFileName());
-                DataInputStream in = new DataInputStream(fileStream);
-                BufferedReader br = new BufferedReader(new InputStreamReader(in));
-                ) {
-            String strLine;
+        Scanner sc = null;
+
+        try (FileInputStream fileStream = new FileInputStream(getFileName());) {
+            sc = new Scanner(fileStream);
             StringBuilder proteinSequence = null;
             String header = null;
 
-            // read in the fasta file
-            while ((strLine = br.readLine()) != null) {
+            while (sc.hasNextLine()) {
+                String strLine = sc.nextLine();
+
                 if (strLine.startsWith(">")) {
                     checkAndProcess(header, proteinSequence);
 
@@ -76,9 +73,18 @@ public abstract class AbstractFastaParser {
                 }
             }
 
+            // process the last entry
             checkAndProcess(header, proteinSequence);
+
+            if (sc.ioException() != null) {
+                throw sc.ioException();
+            }
         } catch (Exception e) {
-            throw new IOException("Problem while parsing the file", e);
+            throw e;
+        } finally {
+            if (sc != null) {
+                sc.close();
+            }
         }
 
         return entryCount;
