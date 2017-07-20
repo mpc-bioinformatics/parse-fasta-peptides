@@ -29,8 +29,10 @@
 		<neo4j.version>3.2.1</neo4j.version>
 		<neo4j-java-driver.version>1.4.1</neo4j-java-driver.version>
 		<pride-utilities.version>2.0.11</pride-utilities.version>
-		<ehcache.version>3.3.1</ehcache.version>
 		<commons-io.version>2.4</commons-io.version>
+		<commons-jcs.version>2.1</commons-jcs.version>
+		<commons-dbcp.version>1.4</commons-dbcp.version>
+		<mysql-connector.version>5.1.42</mysql-connector.version>
 	</properties>
 	
 	<dependencies>
@@ -49,6 +51,11 @@
 		<dependency>
 			<groupId>org.apache.logging.log4j</groupId>
 			<artifactId>log4j-core</artifactId>
+			<version>${log4j.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.logging.log4j</groupId>
+			<artifactId>log4j-jcl</artifactId>
 			<version>${log4j.version}</version>
 		</dependency>
 		
@@ -75,24 +82,26 @@
 			<artifactId>pride-utilities</artifactId>
 			<version>${pride-utilities.version}</version>
 		</dependency>
-		<!-- 
-		<dependency>
-			<groupId>org.apache.geronimo.specs</groupId>
-			<artifactId>geronimo-jta_1.1_spec</artifactId>
-			<version>1.1.1</version>
-		</dependency>
-		 -->
-		
-		<dependency>
-			<groupId>org.ehcache</groupId>
-			<artifactId>ehcache</artifactId>
-			<version>${ehcache.version}</version>
-		</dependency>
 		
 		<dependency>
 			<groupId>commons-io</groupId>
 			<artifactId>commons-io</artifactId>
 			<version>${commons-io.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.commons</groupId>
+			<artifactId>commons-jcs-core</artifactId>
+			<version>${commons-jcs.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>commons-dbcp</groupId>
+			<artifactId>commons-dbcp</artifactId>
+			<version>${commons-dbcp.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>mysql</groupId>
+			<artifactId>mysql-connector-java</artifactId>
+			<version>${mysql-connector.version}</version>
 		</dependency>
 	</dependencies>
 

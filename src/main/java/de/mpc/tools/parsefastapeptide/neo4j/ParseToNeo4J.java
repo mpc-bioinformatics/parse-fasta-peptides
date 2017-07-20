@@ -4,24 +4,21 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
-import org.apache.commons.io.FileUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.ehcache.Cache;
-import org.ehcache.PersistentCacheManager;
-import org.ehcache.config.builders.CacheConfigurationBuilder;
-import org.ehcache.config.builders.CacheManagerBuilder;
-import org.ehcache.config.builders.ResourcePoolsBuilder;
-import org.ehcache.config.units.EntryUnit;
-import org.ehcache.config.units.MemoryUnit;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Label;
+import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Transaction;
 import org.neo4j.graphdb.factory.GraphDatabaseFactory;
 import org.neo4j.graphdb.schema.Schema;
@@ -29,6 +26,7 @@ import org.neo4j.unsafe.batchinsert.BatchInserter;
 import org.neo4j.unsafe.batchinsert.BatchInserters;
 
 import de.mpc.tools.parsefastapeptide.AbstractFastaParser;
+import de.mpc.tools.parsefastapeptide.DigestException;
 import de.mpc.tools.parsefastapeptide.Enzyme;
 import de.mpc.tools.parsefastapeptide.ProteinDigester;
 import uk.ac.ebi.pride.utilities.mol.MoleculeUtilities;
@@ -40,9 +38,6 @@ public class ParseToNeo4J extends AbstractFastaParser {
 
     private static final Logger LOGGER = LogManager.getLogger("ParseToNeo4J");
 
-
-    /** connection for batch insertions */
-    private BatchInserter batchInserter;
 
     /** the used enzyme */
     private ProteinDigester enzyme;
@@ -72,27 +67,24 @@ public class ParseToNeo4J extends AbstractFastaParser {
     /** whether the unmodified ion should be stored as well, if fixed modifications are given */
     private boolean encodeUnmodified = true;
 
-    /** counter for the processed entries */
-    private int processedEntries;
+    /** counter for the processed accessions */
+    private long processedAccessions;
 
 
-    /** temporary path for caches */
-    private Path tmpCachePath;
 
-    /** the cache manager */
-    private PersistentCacheManager cacheManager;
+    /** mapping from peptide sequences to the position of the accessions in this batch-round only */
+    private Map<String, Set<Integer>> peptidesInBatch;
 
-    /** mapping from ID to the peptide */
-    private Cache<String, Long> pepMap;
+    /** the accessions in this batch */
+    private List<String> accessionsInBatch;
 
     /** counter for added peptides*/
     private long addedPeptides;
 
-    /** alias for the peptide cache cache */
-    private static final String PEPTIDE_CACHE_ALIAS = "peptides-cache";
+    /** maximal number of peptides before issueing an insertion */
+    private long maxPeptidesBeforeInsert;
 
-    /** maximal used disk space for caching */
-    private static final long CACHE_DISK_SPACE_GB = 500;
+    private boolean pepSequenceIndexCreated;
 
 
     // constants
@@ -136,33 +128,30 @@ public class ParseToNeo4J extends AbstractFastaParser {
 
         variableModifications = new HashMap<>();
         variableModifications.put('M', 15.994915);
+
+        maxPeptidesBeforeInsert = 5000000;
         // <<<<<<< settings up to here
 
-        processedEntries = 0;
-
-        // caching of peptides
-        try {
-            tmpCachePath = Files.createTempDirectory("digest_cache_");
-        } catch (IOException e) {
-            LOGGER.error("Could not create tmp path for caching", e);
-            throw new AssertionError(e);
-        }
-
-        cacheManager = CacheManagerBuilder.newCacheManagerBuilder()
-                .with(CacheManagerBuilder.persistence(tmpCachePath.toString()))
-                .withCache(PEPTIDE_CACHE_ALIAS, CacheConfigurationBuilder.newCacheConfigurationBuilder(String.class, Long.class,
-                        ResourcePoolsBuilder.newResourcePoolsBuilder()
-                                .heap(1000000000, EntryUnit.ENTRIES)
-                                .disk(CACHE_DISK_SPACE_GB, MemoryUnit.GB, false)
-                                )
-                    )
-                .build(true);
-
+        processedAccessions = 0;
         addedPeptides = 0;
-        pepMap = cacheManager.getCache(PEPTIDE_CACHE_ALIAS, String.class, Long.class);
+        pepSequenceIndexCreated = false;
 
+        // caching of peptides for the insertion round
+        peptidesInBatch = new HashMap<>();
+        accessionsInBatch = new ArrayList<>();
 
         initializeGraphDB();
+    }
+
+
+    /**
+     * sets the maximal number of parsed peptides before inserting into the DB.
+     *
+     * @param maxPeps
+     */
+    public void setMaxPeptidesBeforeInsert(long maxPeps) {
+        this.maxPeptidesBeforeInsert = maxPeps;
+        LOGGER.info("set number of peptides before inserting into DB to {}", maxPeptidesBeforeInsert);
     }
 
 
@@ -171,16 +160,9 @@ public class ParseToNeo4J extends AbstractFastaParser {
      */
     public void shutdown() {
         LOGGER.info("Cleaning up temp files.");
-        if (cacheManager != null) {
-            pepMap.clear();
-            cacheManager.close();
-        }
 
-        try {
-            FileUtils.deleteDirectory(tmpCachePath.toFile());
-        } catch (IOException e) {
-            LOGGER.error(e);
-        }
+        // nothing on file level to do anymore
+
         LOGGER.info("Cleanup done.");
     }
 
@@ -214,21 +196,16 @@ public class ParseToNeo4J extends AbstractFastaParser {
                 LOGGER.error("Cannot create directory '{}'", dbPath, ex);
             }
         }
-
-        // everything else works with the batchinserter, no more work here
     }
 
 
     @Override
     public int parseFastaFile() throws IOException {
-        batchInserter = BatchInserters.inserter( new File(dbPath) );
-
         int parsedEntries = super.parseFastaFile();
-        LOGGER.info("Added {} peptides to the cache.", addedPeptides);
 
-        LOGGER.info("Closing batch inserter.");
-        batchInserter.shutdown();
-        LOGGER.info("Batch inserter closed.");
+        // insert the last peptides
+        insertPeptidesOfBatchIntoDB();
+        LOGGER.info("Added {} peptides to the DB.", addedPeptides);
 
         // add the indizes
         createIndizes();
@@ -239,7 +216,129 @@ public class ParseToNeo4J extends AbstractFastaParser {
 
     @Override
     public void processEntry(String header, StringBuilder proteinSequence) {
-        // add the accession into the sequence
+        Integer accessionID = accessionsInBatch.size();
+        accessionsInBatch.add(header);
+
+        try {
+            // digest the sequence and cache the peptides
+            enzyme.digest(proteinSequence.toString())
+                    .forEach(peptide -> {
+                        if (MoleculeUtilities.isAminoAcidSequence(peptide)) {
+                            // save accession Id for the peptide
+                            peptidesInBatch.computeIfAbsent(peptide, pep -> new HashSet<Integer>()).add(accessionID);
+                        } else {
+                            LOGGER.error("Could not add peptide for '{}', this is considered to be no peptide sequence: '{}'", header, peptide);
+                        }
+                    });
+        } catch (DigestException e) {
+            LOGGER.error("error digesting sequence: {}", proteinSequence, e);
+        }
+
+        processedAccessions++;
+        if (processedAccessions % 10000 == 0) {
+            LOGGER.info("processed {} entries ({} peptides in batch)...", processedAccessions, peptidesInBatch.size());
+        }
+
+        if (peptidesInBatch.size() >= maxPeptidesBeforeInsert) {
+            insertPeptidesOfBatchIntoDB();
+        }
+    }
+
+
+    /**
+     * Processes the peptides of the batch into the graphDB
+     */
+    private void insertPeptidesOfBatchIntoDB() {
+        LOGGER.info("insert batch called with {} accessions and {} peptides", processedAccessions, peptidesInBatch.size());
+
+        Map<String, Long> pepMapSequenceToIDs = getPeptideIDsInGraph(peptidesInBatch.keySet());
+
+        try {
+            BatchInserter batchInserter = BatchInserters.inserter( new File(dbPath) );
+
+            // add accessions to graph and map to the accession IDs in the graph
+            List<Long> accessionIds = accessionsInBatch.stream()
+                    .map(header -> addAccessionToGraph(header, batchInserter))
+                    .collect(Collectors.toList());
+
+            int count = 0;
+            for (Map.Entry<String, Set<Integer>> pepInBatch : peptidesInBatch.entrySet()) {
+                // get peptide's ID or create it
+                Long pepNodeId = pepMapSequenceToIDs.get(pepInBatch.getKey());
+                if (pepNodeId == null) {
+                    pepNodeId = insertPeptideInDB(pepInBatch.getKey(), batchInserter);
+                }
+
+                // connect to accessions
+                for (Integer acc : pepInBatch.getValue()) {
+                    Long accNodeId = accessionIds.get(acc);
+                    batchInserter.createRelationship(accNodeId, pepNodeId, DigestedRelTypes.BELONGS_TO, null);
+                }
+
+                if (++count % (maxPeptidesBeforeInsert / 10) == 0) {
+                    LOGGER.info("added {} of {} peptides", count, peptidesInBatch.size());
+                }
+            }
+
+            LOGGER.info("Closing batch inserter.");
+            batchInserter.shutdown();
+            LOGGER.info("Batch inserter closed.");
+        } catch (IOException e) {
+            LOGGER.error("error while inserting batch of peptides", e);
+        }
+
+        // clearing the batch entries
+        peptidesInBatch.clear();
+        accessionsInBatch.clear();
+    }
+
+
+    /**
+     * Gets the peptide Ids for the given peptides, which are already in teh graph.
+     * @param peptides
+     * @return mapping of the given peptides, which are already in the graph
+     */
+    private Map<String, Long> getPeptideIDsInGraph(Collection<String> peptides) {
+        LOGGER.info("Getting IDs of batch's peptides, that are already in the DB");
+
+        GraphDatabaseService graphDb = new GraphDatabaseFactory().newEmbeddedDatabase( new File(dbPath) );
+        registerShutdownHook(graphDb);
+
+        // create an index on the peptides
+        if (!pepSequenceIndexCreated) {
+            createPeptideSequenceIndex(graphDb);
+        }
+
+        Map<String, Long> pepIdMap = new HashMap<>(peptides.size());
+
+        try (Transaction tx = graphDb.beginTx()) {
+            for (String peptide : peptides) {
+                Node pepNode = graphDb.findNode(LABEL_PEPTIDE, PROPERTY_SEQUENCE, peptide);
+                if (pepNode != null) {
+                    pepIdMap.put(peptide, pepNode.getId());
+                }
+            }
+
+            tx.success();
+        }
+
+        LOGGER.info("found {} peptides already in the DB", pepIdMap.size());
+
+        //dropPeptideIndizes(graphDb);
+
+        graphDb.shutdown();
+        return pepIdMap;
+    }
+
+
+    /**
+     * Adds the given accession into the graph using the {@link BatchInserter}
+     *
+     * @param header
+     * @param batchInserter
+     * @return
+     */
+    private long addAccessionToGraph(String header, BatchInserter batchInserter) {
         String[] splitHeader = header.split("\\s", 2);
         Map<String, Object> accProperties = new HashMap<>();
         accProperties.put(PROPERTY_ACCESSION, splitHeader[0]);
@@ -248,54 +347,9 @@ public class ParseToNeo4J extends AbstractFastaParser {
         } else {
             accProperties.put(PROPERTY_DESCRIPTION, splitHeader[0]);
         }
+
         //accProperties.put(PROPERTY_SEQUENCE, proteinSequence );
-        long accNodeId = batchInserter.createNode(accProperties, LABEL_ACCESSION);
-
-        // digest the sequence and cache the peptides
-        try {
-            enzyme.digest(proteinSequence.toString())
-                    .forEach(peptide -> {
-                        if (MoleculeUtilities.isAminoAcidSequence(peptide)) {
-                            processPeptideAndConnectToAccession(peptide, accNodeId);
-                        } else {
-                            LOGGER.error("Could not add peptide for '{}', this is considered to be no peptide seqeunce: '{}'", header, peptide);
-                        }
-                    });
-
-            processedEntries++;
-            if (processedEntries % 1000 == 0) {
-                LOGGER.info("processed {} entries ({} peptides)...", processedEntries, addedPeptides);
-            }
-        } catch (Exception e) {
-            LOGGER.error("Error while processing '" + header + "'", e);
-        }
-    }
-
-
-    /**
-     * Adds the peptide to the graph, if necessary, and connects the given accession with it.
-     *
-     * @param peptide
-     * @param accNodeId
-     * @return
-     */
-    private Long processPeptideAndConnectToAccession(String peptide, long accNodeId) {
-        long pepNodeId;
-
-        if (pepMap.containsKey(peptide)) {
-            pepNodeId = pepMap.get(peptide);
-        } else {
-            pepNodeId = insertPeptideInDB(peptide);
-            pepMap.put(peptide, pepNodeId);
-            addedPeptides++;
-        }
-
-        // TODO: add the start-stop-locations
-        // Map<String, Object> hasPeptideProperties = new HashMap<String, Object>(2);
-
-        batchInserter.createRelationship(accNodeId, pepNodeId, DigestedRelTypes.BELONGS_TO, null);
-
-        return pepNodeId;
+        return batchInserter.createNode(accProperties, LABEL_ACCESSION);
     }
 
 
@@ -305,14 +359,15 @@ public class ParseToNeo4J extends AbstractFastaParser {
      * @param peptide th epeptide sequence
      * @return the peptide node id
      */
-    private long insertPeptideInDB(String peptide) {
+    private long insertPeptideInDB(String peptide, BatchInserter batchInserter) {
         Map<String, Object> pepProperties = new HashMap<>(2);
         pepProperties.put(PROPERTY_SEQUENCE, peptide);
         pepProperties.put(PROPERTY_LENGTH, peptide.length());
         long pepID = batchInserter.createNode(pepProperties, LABEL_PEPTIDE);
 
-        addIonsForPeptide(pepID, peptide);
+        addIonsForPeptide(pepID, peptide, batchInserter);
 
+        addedPeptides++;
         return pepID;
     }
 
@@ -323,7 +378,7 @@ public class ParseToNeo4J extends AbstractFastaParser {
      * @param pepNodeId
      * @param sequence
      */
-    private void addIonsForPeptide(long pepNodeId, String sequence) {
+    private void addIonsForPeptide(long pepNodeId, String sequence, BatchInserter batchInserter) {
         Map<String, Double> modificationMasses = getPossibleModificationMasses(sequence);
 
         Double enzymeAddedMass = NeutralLoss.WATER_LOSS.getMonoMass();
@@ -469,6 +524,34 @@ public class ParseToNeo4J extends AbstractFastaParser {
 
 
     /**
+     * Creates the index on the peptide sequence
+     */
+    private void createPeptideSequenceIndex(GraphDatabaseService graphDb) {
+        LOGGER.info("Creating peptide sequence index");
+
+        try (Transaction tx = graphDb.beginTx()) {
+            Schema schema = graphDb.schema();
+
+            schema.indexFor(LABEL_PEPTIDE)
+                    .on(PROPERTY_SEQUENCE)
+                    .create();
+
+            tx.success();
+        }
+
+        try (Transaction tx = graphDb.beginTx()) {
+            Schema schema = graphDb.schema();
+            schema.awaitIndexesOnline(30, TimeUnit.DAYS);
+            tx.success();
+        }
+
+        pepSequenceIndexCreated = true;
+
+        LOGGER.info("Peptide Sequence index created.");
+    }
+
+
+    /**
      * Creates the indizes for the graphDB
      */
     private void createIndizes() {
@@ -480,12 +563,14 @@ public class ParseToNeo4J extends AbstractFastaParser {
         try (Transaction tx = graphDb.beginTx()) {
             Schema schema = graphDb.schema();
 
+            if (!pepSequenceIndexCreated) {
+                schema.indexFor(LABEL_PEPTIDE)
+                        .on(PROPERTY_SEQUENCE)
+                        .create();
+            }
+
             schema.indexFor(LABEL_ACCESSION)
                     .on(PROPERTY_ACCESSION)
-                    .create();
-
-            schema.indexFor(LABEL_PEPTIDE)
-                    .on(PROPERTY_SEQUENCE)
                     .create();
 
             schema.indexFor(LABEL_ION)
@@ -498,6 +583,7 @@ public class ParseToNeo4J extends AbstractFastaParser {
         try (Transaction tx = graphDb.beginTx()) {
             Schema schema = graphDb.schema();
             schema.awaitIndexesOnline(30, TimeUnit.DAYS);
+            tx.success();
         }
         LOGGER.info("Indizes created.");
 
@@ -534,6 +620,17 @@ public class ParseToNeo4J extends AbstractFastaParser {
         }
 
         ParseToNeo4J parser = new ParseToNeo4J(filePath, dbPath);
+
+        if (argv.length > 2) {
+            long maxPeps;
+            try {
+                maxPeps = Long.parseLong(argv[2]);
+            } catch (NumberFormatException e) {
+                maxPeps = 5000000;
+            }
+            parser.setMaxPeptidesBeforeInsert(maxPeps);
+        }
+
         LOGGER.info("start parsing");
         try {
             parser.parseFastaFile();
@@ -547,9 +644,7 @@ public class ParseToNeo4J extends AbstractFastaParser {
 
     /*
 
-
-
-snippets:
+neo4j snippets:
 
 shared peptides:
 MATCH (a:accession)-[r:BELONGS_TO]->(p:peptide)
@@ -567,4 +662,5 @@ WHERE
 RETURN count(p)
 
      */
+
 }

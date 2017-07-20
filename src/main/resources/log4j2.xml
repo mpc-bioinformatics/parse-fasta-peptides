@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Configuration status="WARN">
+<Configuration status="INFO">
 	<Appenders>
 		<Console name="Console" target="SYSTEM_OUT">
 			<PatternLayout pattern="%d{HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n"/>
@@ -10,5 +10,10 @@
 		<Root level="info">
 			<AppenderRef ref="Console"/>
 		</Root>
+		
+		<!-- very noisy logging on info -->
+		<Logger name="org.apache.commons.jcs.auxiliary.disk.jdbc.JDBCDiskCache" level="warn">
+			<AppenderRef ref="CONSOLE"/>
+		</Logger>
 	</Loggers>
 </Configuration>
