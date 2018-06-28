@@ -5,12 +5,14 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -73,7 +75,7 @@ public class ParseToNeo4J extends AbstractFastaParser {
 
 
     /** mapping from peptide sequences to the position of the accessions in this batch-round only */
-    private Map<String, Set<Integer>> peptidesInBatch;
+    private TreeMap<String, Set<Integer>> peptidesInBatch;
 
     /** the accessions in this batch */
     private List<String> accessionsInBatch;
@@ -137,7 +139,7 @@ public class ParseToNeo4J extends AbstractFastaParser {
         pepSequenceIndexCreated = false;
 
         // caching of peptides for the insertion round
-        peptidesInBatch = new HashMap<>();
+        peptidesInBatch = new TreeMap<>();
         accessionsInBatch = new ArrayList<>();
 
         initializeGraphDB();
@@ -251,7 +253,7 @@ public class ParseToNeo4J extends AbstractFastaParser {
     private void insertPeptidesOfBatchIntoDB() {
         LOGGER.info("insert batch called with {} accessions and {} peptides", processedAccessions, peptidesInBatch.size());
 
-        Map<String, Long> pepMapSequenceToIDs = getPeptideIDsInGraph(peptidesInBatch.keySet());
+        List<Long> batchPeptidesIDs = getPeptideIDsInGraph(peptidesInBatch.navigableKeySet());
 
         try {
             BatchInserter batchInserter = BatchInserters.inserter( new File(dbPath) );
@@ -262,9 +264,13 @@ public class ParseToNeo4J extends AbstractFastaParser {
                     .collect(Collectors.toList());
 
             int count = 0;
-            for (Map.Entry<String, Set<Integer>> pepInBatch : peptidesInBatch.entrySet()) {
+            int peptidesInBatchSize = peptidesInBatch.size();
+            Iterator<Map.Entry<String, Set<Integer>>> pepsInBatchIter = peptidesInBatch.entrySet().iterator();
+            while (pepsInBatchIter.hasNext()) {
+                Map.Entry<String, Set<Integer>> pepInBatch = pepsInBatchIter.next();
+
                 // get peptide's ID or create it
-                Long pepNodeId = pepMapSequenceToIDs.get(pepInBatch.getKey());
+                Long pepNodeId = batchPeptidesIDs.get(count);
                 if (pepNodeId == null) {
                     pepNodeId = insertPeptideInDB(pepInBatch.getKey(), batchInserter);
                 }
@@ -275,8 +281,9 @@ public class ParseToNeo4J extends AbstractFastaParser {
                     batchInserter.createRelationship(accNodeId, pepNodeId, DigestedRelTypes.BELONGS_TO, null);
                 }
 
-                if (++count % (maxPeptidesBeforeInsert / 10) == 0) {
-                    LOGGER.info("added {} of {} peptides", count, peptidesInBatch.size());
+                pepsInBatchIter.remove();
+                if (++count % (peptidesInBatchSize / 10) == 0) {
+                    LOGGER.info("added {} of {} peptides", count, peptidesInBatchSize);
                 }
             }
 
@@ -294,11 +301,11 @@ public class ParseToNeo4J extends AbstractFastaParser {
 
 
     /**
-     * Gets the peptide Ids for the given peptides, which are already in teh graph.
+     * Gets the peptide Ids for the given peptides, which are already in the graph.
      * @param peptides
-     * @return mapping of the given peptides, which are already in the graph
+     * @return IDs of the peptides, in the same order as the given peptides
      */
-    private Map<String, Long> getPeptideIDsInGraph(Collection<String> peptides) {
+    private List<Long> getPeptideIDsInGraph(NavigableSet<String> peptides) {
         LOGGER.info("Getting IDs of batch's peptides, that are already in the DB");
 
         GraphDatabaseService graphDb = new GraphDatabaseFactory().newEmbeddedDatabase( new File(dbPath) );
@@ -309,25 +316,27 @@ public class ParseToNeo4J extends AbstractFastaParser {
             createPeptideSequenceIndex(graphDb);
         }
 
-        Map<String, Long> pepIdMap = new HashMap<>(peptides.size());
+        List<Long> pepIdList = new ArrayList<>(peptides.size());
+        int countIdList = 0;
 
         try (Transaction tx = graphDb.beginTx()) {
             for (String peptide : peptides) {
                 Node pepNode = graphDb.findNode(LABEL_PEPTIDE, PROPERTY_SEQUENCE, peptide);
                 if (pepNode != null) {
-                    pepIdMap.put(peptide, pepNode.getId());
+                    pepIdList.add(pepNode.getId());
+                    countIdList++;
+                } else {
+                    pepIdList.add(null);
                 }
             }
 
             tx.success();
         }
 
-        LOGGER.info("found {} peptides already in the DB", pepIdMap.size());
-
-        //dropPeptideIndizes(graphDb);
+        LOGGER.info("found {} peptides already in the DB", countIdList);
 
         graphDb.shutdown();
-        return pepIdMap;
+        return pepIdList;
     }
 
 

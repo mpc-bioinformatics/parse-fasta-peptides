@@ -110,6 +110,21 @@ public class ParseFastaPeptides {
                 proteinSequence.append(strLine.trim());
             }
         }
+
+        // digest the last protein
+        if ((accession != null) && (proteinSequence != null) && (proteinSequence.length() > 0)) {
+            for (String peptide : digester[0].digest(proteinSequence.toString())) {
+                Set<String> accSet = peptideAccessionMap.get(peptide);
+                if (accSet == null) {
+                    accSet = new HashSet<String>();
+                    peptideAccessionMap.put(peptide, accSet);
+                    peptideAllOccurrences.put(peptide, 0);
+                }
+                accSet.add(accession);
+                peptideAllOccurrences.put(peptide, peptideAllOccurrences.get(peptide) + 1);
+            }
+        }
+
         br.close();
         System.out.println("digestion with " + digester[0].getEnzyme().toString() + " done, " + peptideAccessionMap.size() + " peptides");
 
@@ -179,14 +194,22 @@ public class ParseFastaPeptides {
 
 
     public static void main(String[] argv) throws IOException, DigestException {
+        /*
         ParseFastaPeptides parser = new ParseFastaPeptides(
-                "/mnt/data/uniNOBACKUP/FASTAs/uniprot-taxonomy-taxonomy_homo_sapiens-isos-2017_04.fasta",
+                "/mnt/data/uniNOBACKUP/FASTAs/uniprot_sprot_20171129.fasta",
                 new String[]{Enzyme.TRYPSIN.toString()},
                 6,
                 45,
                 2);
+        */
+        ParseFastaPeptides parser = new ParseFastaPeptides(
+                "/mnt/data/uni/lehre/2018SS-Vorlesung_Tutorial/tutorial01/NUPR1.protein.fasta",
+                new String[]{Enzyme.TRYPSIN.toString()},
+                0,
+                0,
+                0);
 
-        String outFileName = "/mnt/data/uniNOBACKUP/FASTAs/shared/uniprot-taxonomy-taxonomy_homo_sapiens-isos-2017_04.fasta.trypsin-2_missed-6_0.txt";
+        String outFileName = "/mnt/data/uni/lehre/2018SS-Vorlesung_Tutorial/tutorial01/NUPR1.protein.fasta.digested.0_missed.txt";
         boolean split = false;
         int splitlength = 1000000;
 

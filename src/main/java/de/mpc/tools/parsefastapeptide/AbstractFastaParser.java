@@ -1,8 +1,11 @@
 package de.mpc.tools.parsefastapeptide;
 
-import java.io.FileInputStream;
+import java.io.File;
 import java.io.IOException;
-import java.util.Scanner;
+
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.LineIterator;
+
 
 /**
  * Abstract class for FASTA file parsing. Provides the basic parsing functions,
@@ -50,43 +53,31 @@ public abstract class AbstractFastaParser {
      */
     public int parseFastaFile() throws IOException {
         int entryCount = 0;
-        Scanner sc = null;
 
-        try (FileInputStream fileStream = new FileInputStream(getFileName());) {
-            sc = new Scanner(fileStream);
-            StringBuilder proteinSequence = null;
-            String header = null;
+        LineIterator it = FileUtils.lineIterator(new File(getFileName()), "UTF-8");
+        StringBuilder proteinSequence = null;
+        String header = null;
 
-            while (sc.hasNextLine()) {
-                String strLine = sc.nextLine();
+        while (it.hasNext()) {
+            String strLine = it.nextLine();
 
-                if (strLine.startsWith(">")) {
-                    checkAndProcess(header, proteinSequence);
+            if (strLine.startsWith(">")) {
+                checkAndProcess(header, proteinSequence);
 
-                    // start of a new entry
-                    header = strLine.substring(1).trim();
-                    proteinSequence = new StringBuilder();
-                    entryCount++;
-                } else if (proteinSequence != null) {
-                    // just reading in the protein sequence
-                    proteinSequence.append(strLine.trim());
-                }
-            }
-
-            // process the last entry
-            checkAndProcess(header, proteinSequence);
-
-            if (sc.ioException() != null) {
-                throw sc.ioException();
-            }
-        } catch (Exception e) {
-            throw e;
-        } finally {
-            if (sc != null) {
-                sc.close();
+                // start of a new entry
+                header = strLine.substring(1).trim();
+                proteinSequence = new StringBuilder();
+                entryCount++;
+            } else if (proteinSequence != null) {
+                // just reading in the protein sequence
+                proteinSequence.append(strLine.trim());
             }
         }
 
+        // process the last entry
+        checkAndProcess(header, proteinSequence);
+
+        it.close();
         return entryCount;
     }
 
